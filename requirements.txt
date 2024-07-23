@@ -1,0 +1,9 @@
+dm_pix>=0.4.3
+einops>=0.8.0
+flax>=0.8.5
+jax[cuda12]>=0.4.30
+optax>=0.2.3
+procgen>=0.10.7
+torch>=2.0.1
+tyro>=0.8.5
+wandb>=0.17.4
