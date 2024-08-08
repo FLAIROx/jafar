@@ -82,6 +82,32 @@ class Genie(nn.Module):
             mle_indices, batch["videos"].shape[2:4]
         )
         return outputs
+    
+    def _sample_internal(self,
+                         batch,
+                         rng,
+                         generation_steps: int = 25,
+                         temp: float = 1.0):
+        
+        tokenizer_outputs = self.tokenizer.vq_encode(batch["videos"], training=False)
+        lam_codes = self.lam.get_codebook[(batch['latent_actions'],)]
+
+        dyna_outputs = self.dynamics._sample_internal(
+            batch=dict(video_tokens=tokenizer_outputs["indices"],
+                        latent_actions=lam_codes[:, :, None, :]),
+            rng=rng,
+            generation_steps=generation_steps,
+            temp=temp,
+        )
+
+        vid_gen = self.tokenizer.decode(
+            dyna_outputs["vid_gen"],
+            video_hw=batch['videos'].shape[2:4],
+        )
+        return vid_gen #[:, -1:]
+    
+    def sample(self, params, batch, rng, generation_steps: int = 25, temp: float = 1.0):
+        return self.apply(params, batch, rng, generation_steps, temp, method=self._sample_internal)
 
 
 def restore_genie_checkpoint(

@@ -49,6 +49,10 @@ class LatentActionModel(nn.Module):
             self.dropout,
         )
 
+    @property
+    def get_codebook(self):
+        return self.vq.get_codebook
+
     def __call__(self, batch: Dict[str, Any], training: bool = True) -> Dict[str, Any]:
         # --- Encode + VQ ---
         H, W = batch["videos"].shape[2:4]

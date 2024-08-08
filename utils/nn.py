@@ -110,6 +110,11 @@ class VectorQuantizer(nn.Module):
             )
         )
         self.drop = nn.Dropout(self.dropout, deterministic=False)
+    
+    @property
+    def get_codebook(self):
+        codebook = normalize(self.codebook)
+        return codebook
 
     def __call__(self, x: jax.Array, training: bool) -> Dict[str, jax.Array]:
         # --- Compute distances ---
