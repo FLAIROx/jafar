@@ -115,6 +115,15 @@ class Genie(nn.Module):
             # --- Sample new tokens for final frame ---
             rng, _rng = jax.random.split(rng)
             final_token_idxs = jnp.where(
+                mask,
+                jnp.where(
+                    step != generation_steps,
+                    jax.random.categorical(_rng, final_logits / temp),
+                    jnp.argmax(final_logits, axis=-1),
+                ),
+                token_idxs[:, -1],
+            )
+            final_token_idxs = jnp.where(
                 step != generation_steps,
                 jax.random.categorical(_rng, final_logits / temp),
                 jnp.argmax(final_logits, axis=-1),
