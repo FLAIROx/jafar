@@ -109,8 +109,8 @@ for vids in dataloader:
 latent_actions = jnp.ones(args.num_latent_actions).repeat(args.batch_size)[:args.batch_size]
 rng, _rng = jax.random.split(rng)
 batch = dict(
-    videos=video_batch,  # Full video batch
-    latent_actions=jnp.ones((args.batch_size, video_batch.shape[1], 1), dtype=jnp.int32)*4,    # A single latent action per video frame, (B, T, 1)
+    videos=video_batch[:, :1],  # Full video batch
+    latent_actions=jnp.ones((args.batch_size, 1, 1), dtype=jnp.int32)*0,    # A single latent action per video frame, (B, T, 1)
     rng=_rng,
 )
 
@@ -123,9 +123,8 @@ vid = _sample(batch)
 
 # Autoregressive loop for generation
 for i in range(args.seq_len - 1):
-    last_frame = vid[:, -1:]  # Get the last frame of the generated video
-    video_patch = jnp.concatenate((video_batch[:, 1:], last_frame), axis=1)  # Update the video patch by appending the last frame and removing the first frame
-    batch["videos"] = video_patch  # Update the batch with the new video patch
+    batch["videos"] = vid  # Update the batch with the new video patch
+    batch["latent_actions"] = jnp.concatenate([batch["latent_actions"], jnp.ones((args.batch_size, 1, 1), dtype=jnp.int32)*0], axis=1)
     vid = _sample(batch)  # Generate the next frame based on the updated video patch
 
 # def imshow(img):
