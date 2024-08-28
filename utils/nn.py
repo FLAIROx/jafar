@@ -126,3 +126,6 @@ class VectorQuantizer(nn.Module):
         # --- Straight through estimator ---
         z_q = x + jax.lax.stop_gradient(z - x)
         return z_q, z, x, indices
+
+    def get_codes(self, indices: jax.Array):
+        return self.codebook[indices]
