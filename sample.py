@@ -27,7 +27,7 @@ class Args:
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "/home/duser/jafar/data/coinrun.npy"
+    file_path: str = "/homes/80/timonw/flairox_jafar/data/coinrun.npy"
     # Optimization
     batch_size: int = 6
     # Tokenizer
@@ -56,11 +56,11 @@ class Args:
     project: str = "jafari"
     log_interval: int = 5
     log_image_interval: int = 250
-    ckpt_dir: str = "/home/duser/jafar/checkpoints"
+    ckpt_dir: str = "/homes/80/timonw/checkpoints"
     log_checkpoint_interval: int = 25000
     log_gradients: bool = False
     # Sampling
-    checkpoint: str = "/home/duser/jafar/checkpoints/genie_1721738387_200000"
+    checkpoint: str = "/homes/80/timonw/checkpoints/genie_1721738387_200000"
 
 args = tyro.cli(Args)
 rng = jax.random.PRNGKey(args.seed)
@@ -106,11 +106,11 @@ for vids in dataloader:
     video_batch = jnp.array(vids, dtype=jnp.float32) / 255.0
     break
 
-latent_actions = jnp.arange(args.num_latent_actions).repeat(args.batch_size)[:args.batch_size]
+latent_actions = jnp.ones(args.num_latent_actions).repeat(args.batch_size)[:args.batch_size]
 rng, _rng = jax.random.split(rng)
 batch = dict(
-    videos=video_batch[:, :1],  # First frame only
-    latent_actions=jnp.reshape(latent_actions, (args.batch_size, 1, 1)),    # A single latent action per video, should be one less than video length, (B, T-1, 1)
+    videos=video_batch,  # Full video batch
+    latent_actions=jnp.ones((args.batch_size, video_batch.shape[1], 1), dtype=jnp.int32)*4,    # A single latent action per video frame, (B, T, 1)
     rng=_rng,
 )
 
@@ -120,6 +120,13 @@ def _sample(batch):
     return genie.apply(params, batch, method=Genie.sample)
 
 vid = _sample(batch)
+
+# Autoregressive loop for generation
+for i in range(args.seq_len - 1):
+    last_frame = vid[:, -1:]  # Get the last frame of the generated video
+    video_patch = jnp.concatenate((video_batch[:, 1:], last_frame), axis=1)  # Update the video patch by appending the last frame and removing the first frame
+    batch["videos"] = video_patch  # Update the batch with the new video patch
+    vid = _sample(batch)  # Generate the next frame based on the updated video patch
 
 # def imshow(img):
 #     import cv2
