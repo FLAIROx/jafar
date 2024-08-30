@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 import time
 
+import einops
 from orbax.checkpoint import PyTreeCheckpointer
 import numpy as np
 import jax
 import jax.numpy as jnp
 import tyro
+import wandb
 
 from data.dataloader import get_dataloader
 from genie import Genie
@@ -114,8 +116,12 @@ vid = _sample(batch)
 
 # Autoregressive loop for generation
 for i in range(args.seq_len - 1):
-    batch["videos"] = vid  # Update the batch with the new video patch
-    batch["latent_actions"] = jnp.concatenate([batch["latent_actions"], jnp.ones((args.batch_size, 1, 1), dtype=jnp.int32)*0], axis=1)
+    rng, _rng = jax.random.split(rng)
+    batch = dict(
+        videos=vid,  # Update the batch with the new video patch
+        latent_actions=jnp.concatenate([batch["latent_actions"], jnp.ones((args.batch_size, 1, 1), dtype=jnp.int32)*0], axis=1),
+        rng=_rng,
+    )
     vid = _sample(batch)  # Generate the next frame based on the updated video patch
 
 # def imshow(img):
@@ -128,7 +134,16 @@ for i in range(args.seq_len - 1):
 import matplotlib.pyplot as plt
 import time
 t = time.time()
-for b in range(vid.shape[0]):
-    for i in range(vid.shape[1]):
-        plt.imsave(f'gens/{t}_{b}_{i}.png', np.asarray(vid[b, i]))
-        # imshow(np.asarray(vid[b, i]*255.0))
+flat_vid = einops.rearrange(
+    vid * 255, "n t h w c -> (n h) (t w) c"
+)
+flat_vid = np.asarray(flat_vid.astype(np.uint8))
+if args.log:
+    wandb.log(dict(
+        generated_video = wandb.Image(flat_vid),
+    ))
+plt.imsave(f'generation_{t}.png', flat_vid)
+# for b in range(vid.shape[0]):
+#     for i in range(vid.shape[1]):
+#         plt.imsave(f'gens/{t}_{b}_{i}.png', np.asarray(vid[b, i]))
+#         # imshow(np.asarray(vid[b, i]*255.0))
