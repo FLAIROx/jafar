@@ -21,7 +21,7 @@ class Args:
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "/home/duser/jafar/data/coinrun.npy"
+    file_path: str = "/homes/80/timonw/flairox_jafar/data/coinrun.npy"
     # Optimization
     batch_size: int = 3
     # Tokenizer
@@ -48,9 +48,9 @@ class Args:
     log: bool = False
     entity: str = "flair"
     project: str = "jafari"
-    ckpt_dir: str = "/home/duser/jafar/checkpoints"
+    ckpt_dir: str = "/homes/80/timonw/checkpoints"
     # Sampling
-    checkpoint: str = "/home/duser/jafar/checkpoints/genie_1721738387_200000"
+    checkpoint: str = "/homes/80/timonw/checkpoints/genie_1721738387_200000"
     maskgit_steps: int = 25
     temperature: float = 1.0
     sample_argmax: bool = False
@@ -99,11 +99,19 @@ for vids in dataloader:
     video_batch = jnp.array(vids, dtype=jnp.float32) / 255.0
     break
 
-latent_actions = jnp.ones(args.num_latent_actions).repeat(args.batch_size)[:args.batch_size]
+batch = dict(videos=video_batch)
+# --- Sample next frame ---
+# @jax.jit
+def _get_latent_actions(batch):
+    return genie.apply(params, batch, False, method=Genie.vq_encode)
+
+lam_output = _get_latent_actions(batch).reshape(args.batch_size, args.seq_len-1, 1)
+
+# latent_actions = jnp.ones(args.num_latent_actions).repeat(args.batch_size)[:args.batch_size]
 rng, _rng = jax.random.split(rng)
 batch = dict(
     videos=video_batch[:, :1],  # Full video batch
-    latent_actions=jnp.ones((args.batch_size, 1, 1), dtype=jnp.int32)*0,    # A single latent action per video frame, (B, T, 1)
+    latent_actions=lam_output[:, :1],    # A single latent action per video frame, (B, T, 1)
     rng=_rng,
 )
 
@@ -119,7 +127,7 @@ for i in range(args.seq_len - 1):
     rng, _rng = jax.random.split(rng)
     batch = dict(
         videos=vid,  # Update the batch with the new video patch
-        latent_actions=jnp.concatenate([batch["latent_actions"], jnp.ones((args.batch_size, 1, 1), dtype=jnp.int32)*0], axis=1),
+        latent_actions=jnp.concatenate([batch["latent_actions"], lam_output[:, i+1][:, None]], axis=1),
         rng=_rng,
     )
     vid = _sample(batch)  # Generate the next frame based on the updated video patch
