@@ -134,7 +134,7 @@ class Genie(nn.Module):
         return outputs
 
     @nn.compact
-    def sample(self, batch: Dict[str, Any], steps: int = 25, temperature: int = 0.1, sample_argmax: bool = False) -> Any:
+    def sample(self, batch: Dict[str, Any], steps: int = 25, temperature: int = 1, sample_argmax: bool = False) -> Any:
         # Tokenize video
         token_idxs = self.tokenizer.vq_encode(batch["videos"], training=False)['indices']
         new_frame = jnp.zeros_like(token_idxs)[:, 0]

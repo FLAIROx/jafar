@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import tyro
 import wandb
+import dm_pix as pix
 
 from data.dataloader import get_dataloader
 from genie import Genie
@@ -45,7 +46,7 @@ class Args:
     dropout: float = 0.0
     mask_limit: float = 0.5
     # Logging
-    log: bool = False
+    log: bool = True
     entity: str = "flair"
     project: str = "jafari"
     ckpt_dir: str = "/homes/80/timonw/checkpoints"
@@ -116,14 +117,14 @@ batch = dict(
 )
 
 # --- Sample next frame ---
-@jax.jit
+# @jax.jit
 def _sample(batch):
     return genie.apply(params, batch, args.maskgit_steps, args.temperature, args.sample_argmax, method=Genie.sample)
 
 vid = _sample(batch)
 
 # Autoregressive loop for generation
-for i in range(args.seq_len - 1):
+for i in range(args.seq_len - 2):
     rng, _rng = jax.random.split(rng)
     batch = dict(
         videos=vid,  # Update the batch with the new video patch
@@ -132,6 +133,10 @@ for i in range(args.seq_len - 1):
     )
     vid = _sample(batch)  # Generate the next frame based on the updated video patch
 
+gt = video_batch.clip(0, 1).reshape(-1, *video_batch.shape[2:])
+recon = vid.clip(0, 1).reshape(-1, *vid.shape[2:])
+psnr = pix.psnr(gt, recon).mean()
+ssim = pix.ssim(gt, recon).mean()
 # def imshow(img):
 #     import cv2
 #     import IPython
@@ -142,15 +147,28 @@ for i in range(args.seq_len - 1):
 import matplotlib.pyplot as plt
 import time
 t = time.time()
+
+# Prepare original video frames
+original_frames = (video_batch * 255).astype(np.uint8)
+
+# Interweave original and generated frames
+interweaved_frames = np.zeros((vid.shape[0] * 2, vid.shape[1], vid.shape[2], vid.shape[3], vid.shape[4]), dtype=np.uint8)
+interweaved_frames[0::2] = original_frames
+interweaved_frames[1::2] = (vid * 255).astype(np.uint8)
+
+# Rearrange the interweaved frames
 flat_vid = einops.rearrange(
-    vid * 255, "n t h w c -> (n h) (t w) c"
+    interweaved_frames, "n t h w c -> (n h) (t w) c"
 )
-flat_vid = np.asarray(flat_vid.astype(np.uint8))
+
 if args.log:
     wandb.log(dict(
-        generated_video = wandb.Image(flat_vid),
+        interweaved_video = wandb.Image(flat_vid),
+        psnr=psnr,
+        ssim=ssim
     ))
-plt.imsave(f'generation_{t}.png', flat_vid)
+
+plt.imsave(f'interweaved_generation_{t}.png', flat_vid)
 # for b in range(vid.shape[0]):
 #     for i in range(vid.shape[1]):
 #         plt.imsave(f'gens/{t}_{b}_{i}.png', np.asarray(vid[b, i]))
