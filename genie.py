@@ -86,7 +86,7 @@ class Genie(nn.Module):
     def sample(self, batch: Dict[str, Any], steps: int = 25, temperature: int = 1.0, sample_argmax: bool = False) -> Any:
         # Tokenize video
         token_idxs = self.tokenizer.vq_encode(batch["videos"], training=False)['indices']
-        new_frame = jnp.zeros_like(token_idxs)[:, :1]
+        new_frame = jnp.zeros_like(token_idxs)[:, 0]
         B, _, N = token_idxs.shape[:3]
         # Get action tokens
         action_tokens = self.lam.vq.get_codes(batch["latent_actions"])
@@ -97,7 +97,7 @@ class Genie(nn.Module):
         def _maskgit_step(carry, step):
             rng, final_token_idxs, mask = carry
             # --- Construct video ---
-            vid_token_idxs = jnp.concatenate((token_idxs, final_token_idxs), axis=1)
+            vid_token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1)
 
             # --- Encode video ---
             vid_embed = self.dynamics.patch_embed(vid_token_idxs)
@@ -149,7 +149,7 @@ class Genie(nn.Module):
         for step in jnp.arange(1, steps + 1):
             carry, _ = _maskgit_step(carry, step)
         new_frame = carry[1]
-        token_idxs = jnp.concatenate((token_idxs, new_frame), axis=1)
+        token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(new_frame, 1)), axis=1)
         vid_gen = self.tokenizer.decode(
             token_idxs,
             video_hw=batch['videos'].shape[2:4],
