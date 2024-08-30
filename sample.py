@@ -1,17 +1,10 @@
 from dataclasses import dataclass
-import os
 import time
 
-import einops
-from flax.training import orbax_utils
-from flax.training.train_state import TrainState
-import optax
-import orbax
 from orbax.checkpoint import PyTreeCheckpointer
 import numpy as np
 import jax
 import jax.numpy as jnp
-import wandb
 import tyro
 
 from data.dataloader import get_dataloader
@@ -22,14 +15,13 @@ ts = int(time.time())
 @dataclass
 class Args:
     # Experiment
-    num_steps: int = 200_000
     seed: int = 0
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "/homes/80/timonw/flairox_jafar/data/coinrun.npy"
+    file_path: str = "/home/duser/jafar/data/coinrun.npy"
     # Optimization
-    batch_size: int = 6
+    batch_size: int = 3
     # Tokenizer
     tokenizer_dim: int = 512
     latent_patch_dim: int = 32
@@ -54,13 +46,12 @@ class Args:
     log: bool = False
     entity: str = "flair"
     project: str = "jafari"
-    log_interval: int = 5
-    log_image_interval: int = 250
-    ckpt_dir: str = "/homes/80/timonw/checkpoints"
-    log_checkpoint_interval: int = 25000
-    log_gradients: bool = False
+    ckpt_dir: str = "/home/duser/jafar/checkpoints"
     # Sampling
-    checkpoint: str = "/homes/80/timonw/checkpoints/genie_1721738387_200000"
+    checkpoint: str = "/home/duser/jafar/checkpoints/genie_1721738387_200000"
+    maskgit_steps: int = 25
+    temperature: float = 1.0
+    sample_argmax: bool = False
 
 args = tyro.cli(Args)
 rng = jax.random.PRNGKey(args.seed)
@@ -117,7 +108,7 @@ batch = dict(
 # --- Sample next frame ---
 @jax.jit
 def _sample(batch):
-    return genie.apply(params, batch, method=Genie.sample)
+    return genie.apply(params, batch, args.maskgit_steps, args.temperature, args.sample_argmax, method=Genie.sample)
 
 vid = _sample(batch)
 

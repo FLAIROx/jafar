@@ -83,15 +83,11 @@ class Genie(nn.Module):
         )
         return outputs
 
-    def sample(self, batch):
-        temp = 1.0
-        generation_steps = 25
+    def sample(self, batch: Dict[str, Any], steps: int = 25, temperature: int = 1.0, sample_argmax: bool = False) -> Any:
         # Tokenize video
         token_idxs = self.tokenizer.vq_encode(batch["videos"], training=False)['indices']
-        # Append new frame
         new_frame = jnp.zeros_like(token_idxs)[:, :1]
-        token_idxs = jnp.concatenate((token_idxs, new_frame), axis=1)
-        B, T, N = token_idxs.shape[:3]
+        B, _, N = token_idxs.shape[:3]
         # Get action tokens
         action_tokens = self.lam.vq.get_codes(batch["latent_actions"])
         # Create mask
@@ -99,10 +95,12 @@ class Genie(nn.Module):
 
         # --- MASKGIT ---
         def _maskgit_step(carry, step):
-            rng, token_idxs, mask = carry
+            rng, final_token_idxs, mask = carry
+            # --- Construct video ---
+            vid_token_idxs = jnp.concatenate((token_idxs, final_token_idxs), axis=1)
 
             # --- Encode video ---
-            vid_embed = self.dynamics.patch_embed(token_idxs)
+            vid_embed = self.dynamics.patch_embed(vid_token_idxs)
             vid_embed = vid_embed.at[:, -1].set(
                 jnp.where(jnp.reshape(mask, (B, N, 1)), self.dynamics.mask_token[0], vid_embed[:, -1])
             )
@@ -110,35 +108,29 @@ class Genie(nn.Module):
             # --- Predict transition ---
             act_embed = self.dynamics.action_up(action_tokens)
             vid_embed += jnp.pad(act_embed, ((0, 0), (1, 0), (0, 0), (0, 0)))
-            final_logits = self.dynamics.dynamics(vid_embed)[:, -1]
+            final_logits = self.dynamics.dynamics(vid_embed)[:, -1] / temperature
 
             # --- Sample new tokens for final frame ---
-            rng, _rng = jax.random.split(rng)
-            final_token_idxs = jnp.where(
-                mask,
-                jnp.where(
-                    step != generation_steps,
-                    jax.random.categorical(_rng, final_logits / temp),
+            if sample_argmax:
+                sampled_token_idxs = jnp.argmax(final_logits, axis=-1)
+            else:
+                rng, _rng = jax.random.split(rng)
+                sampled_token_idxs = jnp.where(
+                    step == steps,
                     jnp.argmax(final_logits, axis=-1),
-                ),
-                token_idxs[:, -1],
-            )
-            final_token_idxs = jnp.where(
-                step != generation_steps,
-                jax.random.categorical(_rng, final_logits / temp),
-                jnp.argmax(final_logits, axis=-1),
-            )
-            token_idxs = token_idxs.at[:, -1].set(final_token_idxs)
+                    jax.random.categorical(_rng, final_logits),
+                )
+            final_token_idxs = jnp.where(mask, sampled_token_idxs, final_token_idxs)
             final_token_probs = jnp.take(jax.nn.softmax(final_logits), final_token_idxs)
 
             # --- Update mask ---
             num_unmasked_tokens = jnp.round(
-                N * jnp.cos(jnp.pi * step / (generation_steps * 2))
+                N * jnp.cos(jnp.pi * step / (steps * 2))
             ).astype(int)
             final_token_probs += ~mask
             prob_threshold = jnp.sort(final_token_probs, axis=1, descending=True)[:, num_unmasked_tokens]
             mask = mask & (final_token_probs < jnp.expand_dims(prob_threshold, -1))
-            return (rng, token_idxs, mask), None
+            return (rng, final_token_idxs, mask), None
 
         # nn.scan(
         #     DynamicsMaskGIT,
@@ -153,10 +145,11 @@ class Genie(nn.Module):
         #     (batch["rng"], token_idxs, init_mask),
         #     jnp.arange(1, generation_steps + 1),
         # )
-        carry = (batch["rng"], token_idxs, init_mask)
-        for step in jnp.arange(1, generation_steps + 1):
+        carry = (batch["rng"], new_frame, init_mask)
+        for step in jnp.arange(1, steps + 1):
             carry, _ = _maskgit_step(carry, step)
-        token_idxs = carry[1]
+        new_frame = carry[1]
+        token_idxs = jnp.concatenate((token_idxs, new_frame), axis=1)
         vid_gen = self.tokenizer.decode(
             token_idxs,
             video_hw=batch['videos'].shape[2:4],
