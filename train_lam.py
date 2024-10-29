@@ -179,7 +179,7 @@ while step < args.num_steps:
                 orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
                 save_args = orbax_utils.save_args_from_target(ckpt)
                 orbax_checkpointer.save(
-                    os.path.join(args.ckpt_dir, f"lam_{ts}_{step}"),
+                    os.path.join(os.getcwd(), args.ckpt_dir, f"lam_{ts}_{step}"),
                     ckpt,
                     save_args=save_args,
                 )
