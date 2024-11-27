@@ -47,11 +47,12 @@ class STBlock(nn.Module):
         # --- Temporal attention ---
         x = x.swapaxes(1, 2)
         z = nn.LayerNorm()(x)
+        causal_mask = jnp.tri(z.shape[-2])
         z = nn.MultiHeadAttention(
             num_heads=self.num_heads,
             qkv_features=self.dim,
             dropout_rate=self.dropout,
-        )(z)
+        )(z, mask=causal_mask)
         x = x + z
         x = x.swapaxes(1, 2)
 
