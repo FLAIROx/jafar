@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from orbax.checkpoint import PyTreeCheckpointer
 import jax
@@ -8,6 +8,7 @@ import flax.linen as nn
 from models.dynamics import DynamicsMaskGIT
 from models.lam import LatentActionModel
 from models.tokenizer import TokenizerVQVAE
+
 
 class MaskGITStep(nn.Module):
     dynamics: nn.Module
@@ -22,10 +23,8 @@ class MaskGITStep(nn.Module):
         step = x
         B, _, N = token_idxs.shape[:3]
 
-        # --- Construct video ---
+        # --- Construct + encode video ---
         vid_token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1)
-
-        # --- Encode video ---
         vid_embed = self.dynamics.patch_embed(vid_token_idxs)
         vid_embed = vid_embed.at[:, -1].set(
             jnp.where(jnp.reshape(mask, (B, N, 1)), self.dynamics.mask_token[0], vid_embed[:, -1])
@@ -46,19 +45,21 @@ class MaskGITStep(nn.Module):
                 jnp.argmax(final_logits, axis=-1),
                 jax.random.categorical(_rng, final_logits),
             )
-        final_token_idxs = jnp.where(mask, sampled_token_idxs, final_token_idxs)
-        final_token_probs = jnp.take(jax.nn.softmax(final_logits), final_token_idxs)
+        gather_fn = jax.vmap(jax.vmap(lambda x, y: x[y]))
+        final_token_probs = gather_fn(jax.nn.softmax(final_logits), sampled_token_idxs)
+        final_token_probs += ~mask
+        new_token_idxs = jnp.where(mask, sampled_token_idxs, final_token_idxs)
 
         # --- Update mask ---
-        num_unmasked_tokens = jnp.round(
-            N * jnp.cos(jnp.pi * step / (self.steps * 2))
-        ).astype(int)
-        final_token_probs += ~mask
-        prob_threshold = jnp.sort(final_token_probs, axis=1, descending=True)[:, num_unmasked_tokens]
-        mask = mask & (final_token_probs < jnp.expand_dims(prob_threshold, -1))
+        unmasked_ratio = jnp.cos(jnp.pi * (step + 1) / (self.steps * 2))
+        num_unmasked_tokens = jnp.round(N * (1.0 - unmasked_ratio)).astype(int)
+        idx_mask = jnp.arange(final_token_probs.shape[-1]) > num_unmasked_tokens
+        sorted_idxs = jnp.argsort(final_token_probs, axis=-1, descending=True)
+        new_mask = jax.vmap(lambda msk, ids: msk.at[ids].set(idx_mask))(mask, sorted_idxs)
 
-        new_carry = (rng, final_token_idxs, mask, token_idxs, action_tokens)
-        return new_carry, final_token_idxs
+        new_carry = (rng, new_token_idxs, new_mask, token_idxs, action_tokens)
+        return new_carry, None
+
 
 class Genie(nn.Module):
     """Genie model"""
@@ -135,17 +136,15 @@ class Genie(nn.Module):
 
     @nn.compact
     def sample(self, batch: Dict[str, Any], steps: int = 25, temperature: int = 1, sample_argmax: bool = False) -> Any:
-        # Tokenize video
+        # --- Encode videos and actions ---
         token_idxs = self.tokenizer.vq_encode(batch["videos"], training=False)['indices']
-        new_frame = jnp.zeros_like(token_idxs)[:, 0]
-        B, _, N = token_idxs.shape[:3]
-        # Get action tokens
+        new_frame_idxs = jnp.zeros_like(token_idxs)[:, 0]
         action_tokens = self.lam.vq.get_codes(batch["latent_actions"])
-        # Create mask
-        init_mask = jnp.ones_like(token_idxs, dtype=bool)[:, 0]
 
-        init_carry = (batch["rng"], new_frame, init_mask, token_idxs, action_tokens)
-        MaskGITScanned = nn.scan(
+        # --- Initialize MaskGIT ---
+        init_mask = jnp.ones_like(token_idxs, dtype=bool)[:, 0]
+        init_carry = (batch["rng"], new_frame_idxs, init_mask, token_idxs, action_tokens)
+        MaskGITLoop = nn.scan(
             MaskGITStep,
             variable_broadcast="params",
             split_rngs={"params": False},
@@ -153,28 +152,27 @@ class Genie(nn.Module):
             out_axes=0,
             length=steps,
         )
-        final_carry, outputs = MaskGITScanned(dynamics=self.dynamics,
+
+        # --- Run MaskGIT loop ---
+        final_carry, _ = MaskGITLoop(dynamics=self.dynamics,
             tokenizer=self.tokenizer,
             temperature=temperature,
             sample_argmax=sample_argmax,
             steps=steps)(init_carry, jnp.arange(steps))
-
-        new_frame = final_carry[1]
-        token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(new_frame, 1)), axis=1)
-        vid_gen = self.tokenizer.decode(
-            token_idxs,
+        new_frame_idxs = final_carry[1]
+        new_frame_pixels = self.tokenizer.decode(
+            jnp.expand_dims(new_frame_idxs, 1),
             video_hw=batch['videos'].shape[2:4],
         )
-        return vid_gen
-        
+        return new_frame_pixels
+
     def vq_encode(self, batch, training) -> Dict[str, Any]:
         # --- Preprocess videos ---
         lam_output = self.lam.vq_encode(batch["videos"], training=training)
         return lam_output["indices"]
 
-def restore_genie_checkpoint(
-    params: Dict[str, Any], tokenizer: str, lam: str, dyna: Optional[str] = None
-):
+
+def restore_genie_components(params: Dict[str, Any], tokenizer: str, lam: str):
     """Restore pre-trained Genie components"""
     params["params"]["tokenizer"].update(
         PyTreeCheckpointer().restore(tokenizer)["model"]["params"]["params"]
@@ -182,8 +180,4 @@ def restore_genie_checkpoint(
     params["params"]["lam"].update(
         PyTreeCheckpointer().restore(lam)["model"]["params"]["params"]
     )
-    if dyna:
-        params["params"]["dyna"].update(
-            PyTreeCheckpointer().restore(dyna)["model"]["params"]["params"]
-        )
     return params
