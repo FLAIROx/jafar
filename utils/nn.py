@@ -36,7 +36,8 @@ class STBlock(nn.Module):
     @nn.compact
     def __call__(self, x: jax.Array) -> jax.Array:
         # --- Spatial attention ---
-        z = nn.LayerNorm()(x)
+        z = PositionalEncoding(self.dim)(x)
+        z = nn.LayerNorm()(z)
         z = nn.MultiHeadAttention(
             num_heads=self.num_heads,
             qkv_features=self.dim,
@@ -46,7 +47,8 @@ class STBlock(nn.Module):
 
         # --- Temporal attention ---
         x = x.swapaxes(1, 2)
-        z = nn.LayerNorm()(x)
+        z = PositionalEncoding(self.dim)(x)
+        z = nn.LayerNorm()(z)
         causal_mask = jnp.tri(z.shape[-2])
         z = nn.MultiHeadAttention(
             num_heads=self.num_heads,
@@ -81,8 +83,6 @@ class STTransformer(nn.Module):
                 nn.LayerNorm(),
             ]
         )(x)
-
-        x = PositionalEncoding(self.model_dim)(x)
         for _ in range(self.num_blocks):
             x = STBlock(
                 dim=self.model_dim,
