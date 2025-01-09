@@ -10,62 +10,6 @@ from models.lam import LatentActionModel
 from models.tokenizer import TokenizerVQVAE
 
 
-class MaskGITStep(nn.Module):
-    dynamics: nn.Module
-    tokenizer: nn.Module
-    temperature: float
-    sample_argmax: bool
-    steps: int
-
-    @nn.compact
-    def __call__(self, carry, x):
-        rng, final_token_idxs, mask, token_idxs, action_tokens = carry
-        step = x
-        B, T, N = token_idxs.shape[:3]
-
-        # --- Construct + encode video ---
-        vid_token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1)
-        vid_embed = self.dynamics.patch_embed(vid_token_idxs)
-        curr_masked_frame = jnp.where(
-            jnp.expand_dims(mask, -1),
-            self.dynamics.mask_token[0],
-            vid_embed[:, -1],
-        )
-        vid_embed = vid_embed.at[:, -1].set(curr_masked_frame)
-
-        # --- Predict transition ---
-        act_embed = self.dynamics.action_up(action_tokens)
-        vid_embed += jnp.pad(act_embed, ((0, 0), (1, 0), (0, 0), (0, 0)))
-        unmasked_ratio = jnp.cos(jnp.pi * (step + 1) / (self.steps * 2))
-        step_temp = self.temperature * (1.0 - unmasked_ratio)
-        final_logits = self.dynamics.dynamics(vid_embed)[:, -1] / step_temp
-
-        # --- Sample new tokens for final frame ---
-        if self.sample_argmax:
-            sampled_token_idxs = jnp.argmax(final_logits, axis=-1)
-        else:
-            rng, _rng = jax.random.split(rng)
-            sampled_token_idxs = jnp.where(
-                step == self.steps - 1,
-                jnp.argmax(final_logits, axis=-1),
-                jax.random.categorical(_rng, final_logits),
-            )
-        gather_fn = jax.vmap(jax.vmap(lambda x, y: x[y]))
-        final_token_probs = gather_fn(jax.nn.softmax(final_logits), sampled_token_idxs)
-        final_token_probs += ~mask
-        # Update masked tokens only
-        new_token_idxs = jnp.where(mask, sampled_token_idxs, final_token_idxs)
-
-        # --- Update mask ---
-        num_unmasked_tokens = jnp.round(N * (1.0 - unmasked_ratio)).astype(int)
-        idx_mask = jnp.arange(final_token_probs.shape[-1]) > num_unmasked_tokens
-        sorted_idxs = jnp.argsort(final_token_probs, axis=-1, descending=True)
-        new_mask = jax.vmap(lambda msk, ids: msk.at[ids].set(idx_mask))(mask, sorted_idxs)
-
-        new_carry = (rng, new_token_idxs, new_mask, token_idxs, action_tokens)
-        return new_carry, None
-
-
 class Genie(nn.Module):
     """Genie model"""
 
@@ -175,6 +119,62 @@ class Genie(nn.Module):
         # --- Preprocess videos ---
         lam_output = self.lam.vq_encode(batch["videos"], training=training)
         return lam_output["indices"]
+
+
+class MaskGITStep(nn.Module):
+    dynamics: nn.Module
+    tokenizer: nn.Module
+    temperature: float
+    sample_argmax: bool
+    steps: int
+
+    @nn.compact
+    def __call__(self, carry, x):
+        rng, final_token_idxs, mask, token_idxs, action_tokens = carry
+        step = x
+        B, T, N = token_idxs.shape[:3]
+
+        # --- Construct + encode video ---
+        vid_token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1)
+        vid_embed = self.dynamics.patch_embed(vid_token_idxs)
+        curr_masked_frame = jnp.where(
+            jnp.expand_dims(mask, -1),
+            self.dynamics.mask_token[0],
+            vid_embed[:, -1],
+        )
+        vid_embed = vid_embed.at[:, -1].set(curr_masked_frame)
+
+        # --- Predict transition ---
+        act_embed = self.dynamics.action_up(action_tokens)
+        vid_embed += jnp.pad(act_embed, ((0, 0), (1, 0), (0, 0), (0, 0)))
+        unmasked_ratio = jnp.cos(jnp.pi * (step + 1) / (self.steps * 2))
+        step_temp = self.temperature * (1.0 - unmasked_ratio)
+        final_logits = self.dynamics.dynamics(vid_embed)[:, -1] / step_temp
+
+        # --- Sample new tokens for final frame ---
+        if self.sample_argmax:
+            sampled_token_idxs = jnp.argmax(final_logits, axis=-1)
+        else:
+            rng, _rng = jax.random.split(rng)
+            sampled_token_idxs = jnp.where(
+                step == self.steps - 1,
+                jnp.argmax(final_logits, axis=-1),
+                jax.random.categorical(_rng, final_logits),
+            )
+        gather_fn = jax.vmap(jax.vmap(lambda x, y: x[y]))
+        final_token_probs = gather_fn(jax.nn.softmax(final_logits), sampled_token_idxs)
+        final_token_probs += ~mask
+        # Update masked tokens only
+        new_token_idxs = jnp.where(mask, sampled_token_idxs, final_token_idxs)
+
+        # --- Update mask ---
+        num_unmasked_tokens = jnp.round(N * (1.0 - unmasked_ratio)).astype(int)
+        idx_mask = jnp.arange(final_token_probs.shape[-1]) > num_unmasked_tokens
+        sorted_idxs = jnp.argsort(final_token_probs, axis=-1, descending=True)
+        new_mask = jax.vmap(lambda msk, ids: msk.at[ids].set(idx_mask))(mask, sorted_idxs)
+
+        new_carry = (rng, new_token_idxs, new_mask, token_idxs, action_tokens)
+        return new_carry, None
 
 
 def restore_genie_components(params: Dict[str, Any], tokenizer: str, lam: str):
