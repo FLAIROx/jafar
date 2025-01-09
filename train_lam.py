@@ -11,8 +11,8 @@ import numpy as np
 import dm_pix as pix
 import jax
 import jax.numpy as jnp
-import wandb
 import tyro
+import wandb
 
 from models.lam import LatentActionModel
 from data.dataloader import get_dataloader
@@ -35,6 +35,7 @@ class Args:
     min_lr: float = 3e-6
     max_lr: float = 3e-5
     warmup_steps: int = 5000
+    vq_reset_thresh: int = 50
     # LAM
     model_dim: int = 512
     latent_dim: int = 32
@@ -52,7 +53,6 @@ class Args:
     log_image_interval: int = 250
     ckpt_dir: str = ""
     log_checkpoint_interval: int = 10000
-    log_gradients: bool = False
 
 
 args = tyro.cli(Args)
@@ -72,6 +72,8 @@ lam = LatentActionModel(
     dropout=args.dropout,
     codebook_dropout=args.codebook_dropout,
 )
+# Track when each action was last sampled
+action_last_active = jnp.zeros(args.num_latents)
 image_shape = (args.image_resolution, args.image_resolution, args.image_channels)
 rng, _rng = jax.random.split(rng)
 inputs = dict(
@@ -105,10 +107,8 @@ def lam_loss_fn(params, state, inputs):
     recon = outputs["recon"].clip(0, 1).reshape(-1, *outputs["recon"].shape[2:])
     psnr = pix.psnr(gt, recon).mean()
     ssim = pix.ssim(gt, recon).mean()
-    _, index_counts = jnp.unique_counts(
-        outputs["indices"], size=args.num_latents, fill_value=0
-    )
-    codebook_usage = (index_counts != 0).mean()
+    count_fn = jax.vmap(lambda i: (outputs["indices"] == i).sum())
+    index_counts = count_fn(jnp.arange(args.num_latents))
     metrics = dict(
         loss=loss,
         mse=mse,
@@ -116,28 +116,32 @@ def lam_loss_fn(params, state, inputs):
         commitment_loss=commitment_loss,
         psnr=psnr,
         ssim=ssim,
-        codebook_usage=codebook_usage,
+        codebook_usage=(index_counts != 0).mean(),
     )
-    return loss, (outputs["recon"], metrics)
+    return loss, (outputs["recon"], index_counts, metrics)
 
 
 # --- Define train step ---
 @jax.jit
-def train_step(state, inputs):
+def train_step(state, inputs, action_last_active):
+    # --- Update model ---
+    rng, inputs["rng"] = jax.random.split(inputs["rng"])
     grad_fn = jax.value_and_grad(lam_loss_fn, has_aux=True, allow_int=True)
-    (loss, (recon, metrics)), grads = grad_fn(state.params, state, inputs)
+    (loss, (recon, idx_counts, metrics)), grads = grad_fn(state.params, state, inputs)
     state = state.apply_gradients(grads=grads)
-    if args.log_gradients:
-        metrics["encoder_gradients_std/"] = jax.tree.map(
-            lambda x: x.std(), grads["params"]["encoder"]
-        )
-        metrics["vq_gradients_std/"] = jax.tree.map(
-            lambda x: x.std(), grads["params"]["vq"]
-        )
-        metrics["decoder_gradients_std/"] = jax.tree.map(
-            lambda x: x.std(), grads["params"]["decoder"]
-        )
-    return state, loss, recon, metrics
+
+    # --- Reset inactive latent actions ---
+    codebook = state.params["params"]["vq"]["codebook"]
+    num_codes = len(codebook)
+    active_codes = idx_counts != 0.0
+    action_last_active = jnp.where(active_codes, 0, action_last_active + 1)
+    p_code = active_codes / active_codes.sum()
+    reset_idxs = jax.random.choice(rng, num_codes, shape=(num_codes,), p=p_code)
+    do_reset = action_last_active >= args.vq_reset_thresh
+    new_codebook = jnp.where(jnp.expand_dims(do_reset, -1), codebook[reset_idxs], codebook)
+    state.params["params"]["vq"]["codebook"] = new_codebook
+    action_last_active = jnp.where(do_reset, 0, action_last_active)
+    return state, loss, recon, action_last_active, metrics
 
 
 # --- TRAIN LOOP ---
@@ -151,7 +155,7 @@ while step < args.num_steps:
             videos=jnp.array(videos, dtype=jnp.float32) / 255.0,
             rng=_rng,
         )
-        train_state, loss, recon, metrics = train_step(train_state, inputs)
+        train_state, loss, recon, action_last_active, metrics = train_step(train_state, inputs, action_last_active)
         print(f"Step {step}, loss: {loss}")
         step += 1
 
