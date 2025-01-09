@@ -21,19 +21,24 @@ class MaskGITStep(nn.Module):
     def __call__(self, carry, x):
         rng, final_token_idxs, mask, token_idxs, action_tokens = carry
         step = x
-        B, _, N = token_idxs.shape[:3]
+        B, T, N = token_idxs.shape[:3]
 
         # --- Construct + encode video ---
         vid_token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1)
         vid_embed = self.dynamics.patch_embed(vid_token_idxs)
-        vid_embed = vid_embed.at[:, -1].set(
-            jnp.where(jnp.reshape(mask, (B, N, 1)), self.dynamics.mask_token[0], vid_embed[:, -1])
+        curr_masked_frame = jnp.where(
+            jnp.expand_dims(mask, -1),
+            self.dynamics.mask_token[0],
+            vid_embed[:, -1],
         )
+        vid_embed = vid_embed.at[:, -1].set(curr_masked_frame)
 
         # --- Predict transition ---
         act_embed = self.dynamics.action_up(action_tokens)
         vid_embed += jnp.pad(act_embed, ((0, 0), (1, 0), (0, 0), (0, 0)))
-        final_logits = self.dynamics.dynamics(vid_embed)[:, -1] / self.temperature
+        unmasked_ratio = jnp.cos(jnp.pi * (step + 1) / (self.steps * 2))
+        step_temp = self.temperature * (1.0 - unmasked_ratio)
+        final_logits = self.dynamics.dynamics(vid_embed)[:, -1] / step_temp
 
         # --- Sample new tokens for final frame ---
         if self.sample_argmax:
@@ -48,10 +53,10 @@ class MaskGITStep(nn.Module):
         gather_fn = jax.vmap(jax.vmap(lambda x, y: x[y]))
         final_token_probs = gather_fn(jax.nn.softmax(final_logits), sampled_token_idxs)
         final_token_probs += ~mask
+        # Update masked tokens only
         new_token_idxs = jnp.where(mask, sampled_token_idxs, final_token_idxs)
 
         # --- Update mask ---
-        unmasked_ratio = jnp.cos(jnp.pi * (step + 1) / (self.steps * 2))
         num_unmasked_tokens = jnp.round(N * (1.0 - unmasked_ratio)).astype(int)
         idx_mask = jnp.arange(final_token_probs.shape[-1]) > num_unmasked_tokens
         sorted_idxs = jnp.argsort(final_token_probs, axis=-1, descending=True)

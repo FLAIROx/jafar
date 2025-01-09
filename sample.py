@@ -1,19 +1,18 @@
 from dataclasses import dataclass
 import time
 
+import dm_pix as pix
 import einops
-from orbax.checkpoint import PyTreeCheckpointer
-import numpy as np
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
+import numpy as np
+from orbax.checkpoint import PyTreeCheckpointer
 import tyro
-import wandb
-import dm_pix as pix
 
 from data.dataloader import get_dataloader
 from genie import Genie
 
-ts = int(time.time())
 
 @dataclass
 class Args:
@@ -24,7 +23,7 @@ class Args:
     image_resolution: int = 64
     file_path: str = "/homes/80/timonw/flairox_jafar/data/coinrun.npy"
     # Optimization
-    batch_size: int = 3
+    batch_size: int = 1
     # Tokenizer
     tokenizer_dim: int = 512
     latent_patch_dim: int = 32
@@ -55,11 +54,12 @@ class Args:
     maskgit_steps: int = 25
     temperature: float = 1.0
     sample_argmax: bool = False
+    start_frame: int = 0
 
 args = tyro.cli(Args)
 rng = jax.random.PRNGKey(args.seed)
 
-# --- Construct train state ---
+# --- Load Genie checkpoint ---
 genie = Genie(
     # Tokenizer
     in_dim=args.image_channels,
@@ -94,82 +94,48 @@ params = genie.init(_rng, dummy_inputs)
 params["params"].update(
     PyTreeCheckpointer().restore(args.checkpoint)["model"]["params"]["params"])
 
-# --- Get video ---
+# --- Get video + latent actions ---
 dataloader = get_dataloader(args.file_path, args.seq_len, args.batch_size)
 for vids in dataloader:
     video_batch = jnp.array(vids, dtype=jnp.float32) / 255.0
     break
-
 batch = dict(videos=video_batch)
-# --- Sample next frame ---
-# @jax.jit
-def _get_latent_actions(batch):
-    return genie.apply(params, batch, False, method=Genie.vq_encode)
+lam_output = genie.apply(params, batch, False, method=Genie.vq_encode)
+lam_output = lam_output.reshape(args.batch_size, args.seq_len-1, 1)
 
-lam_output = _get_latent_actions(batch).reshape(args.batch_size, args.seq_len-1, 1)
+# --- Define autoregressive sampling loop ---
+def _autoreg_sample(rng, video_batch):
+    vid = video_batch[:, :args.start_frame+1]
+    for frame_idx in range(args.start_frame+1, args.seq_len):
+        # --- Sample next frame ---
+        print("Frame", frame_idx)
+        rng, _rng = jax.random.split(rng)
+        batch = dict(videos=vid, latent_actions=lam_output[:, :frame_idx], rng=_rng)
+        new_frame = genie.apply(
+            params,
+            batch,
+            args.maskgit_steps,
+            args.temperature,
+            args.sample_argmax,
+            method=Genie.sample
+        )
+        vid = jnp.concatenate([vid, new_frame], axis=1)
+    return vid
 
-# latent_actions = jnp.ones(args.num_latent_actions).repeat(args.batch_size)[:args.batch_size]
-rng, _rng = jax.random.split(rng)
-batch = dict(
-    videos=video_batch[:, :1],  # Full video batch
-    latent_actions=lam_output[:, :1],    # A single latent action per video frame, (B, T, 1)
-    rng=_rng,
-)
-
-# --- Sample next frame ---
-# @jax.jit
-def _sample(batch):
-    return genie.apply(params, batch, args.maskgit_steps, args.temperature, args.sample_argmax, method=Genie.sample)
-
-vid = _sample(batch)
-
-# Autoregressive loop for generation
-for i in range(args.seq_len - 2):
-    rng, _rng = jax.random.split(rng)
-    batch = dict(
-        videos=vid,  # Update the batch with the new video patch
-        latent_actions=jnp.concatenate([batch["latent_actions"], lam_output[:, i+1][:, None]], axis=1),
-        rng=_rng,
-    )
-    vid = _sample(batch)  # Generate the next frame based on the updated video patch
-
-gt = video_batch.clip(0, 1).reshape(-1, *video_batch.shape[2:])
+# --- Sample + evaluate video ---
+vid = _autoreg_sample(rng, video_batch)
+gt = video_batch[:, :vid.shape[1]].clip(0, 1).reshape(-1, *video_batch.shape[2:])
 recon = vid.clip(0, 1).reshape(-1, *vid.shape[2:])
 psnr = pix.psnr(gt, recon).mean()
 ssim = pix.ssim(gt, recon).mean()
-# def imshow(img):
-#     import cv2
-#     import IPython
-#     _,ret = cv2.imencode('.jpg', img)
-#     i = IPython.display.Image(data=ret)
-#     IPython.display.display(i)
+print(f"PSNR: {psnr}, SSIM: {ssim}")
 
-import matplotlib.pyplot as plt
-import time
-t = time.time()
-
-# Prepare original video frames
+# --- Save generated video ---
 original_frames = (video_batch * 255).astype(np.uint8)
-
-# Interweave original and generated frames
-interweaved_frames = np.zeros((vid.shape[0] * 2, vid.shape[1], vid.shape[2], vid.shape[3], vid.shape[4]), dtype=np.uint8)
-interweaved_frames[0::2] = original_frames
+interweaved_frames = np.zeros((vid.shape[0] * 2, *vid.shape[1:5]), dtype=np.uint8)
+interweaved_frames[0::2] = original_frames[:, :vid.shape[1]]
 interweaved_frames[1::2] = (vid * 255).astype(np.uint8)
-
-# Rearrange the interweaved frames
-flat_vid = einops.rearrange(
-    interweaved_frames, "n t h w c -> (n h) (t w) c"
-)
-
-if args.log:
-    wandb.log(dict(
-        interweaved_video = wandb.Image(flat_vid),
-        psnr=psnr,
-        ssim=ssim
-    ))
-
-plt.imsave(f'interweaved_generation_{t}.png', flat_vid)
-# for b in range(vid.shape[0]):
-#     for i in range(vid.shape[1]):
-#         plt.imsave(f'gens/{t}_{b}_{i}.png', np.asarray(vid[b, i]))
-#         # imshow(np.asarray(vid[b, i]*255.0))
+flat_vid = einops.rearrange(interweaved_frames, "n t h w c -> (n h) (t w) c")
+filename = f'interweaved_generation_{time.time()}.png'
+plt.imsave(filename, flat_vid)
+print(f"Generated video saved to {filename}")
