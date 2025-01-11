@@ -21,7 +21,7 @@ class Args:
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "/homes/80/timonw/flairox_jafar/data/coinrun.npy"
+    file_path: str = "data/coinrun.npy"
     # Optimization
     batch_size: int = 1
     # Tokenizer
@@ -48,9 +48,9 @@ class Args:
     log: bool = True
     entity: str = "flair"
     project: str = "jafari"
-    ckpt_dir: str = "/homes/80/timonw/checkpoints"
+    ckpt_dir: str = ""
     # Sampling
-    checkpoint: str = "/homes/80/timonw/checkpoints/genie_1721738387_200000"
+    checkpoint: str = ""
     maskgit_steps: int = 25
     temperature: float = 1.0
     sample_argmax: bool = False
