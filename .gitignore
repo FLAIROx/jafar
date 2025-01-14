@@ -1,4 +1,9 @@
 *.pyc
 *.npy
-wandb/
 *.png
+*.gif
+
+wandb_key
+checkpoints/
+wandb/
+__pycache__/

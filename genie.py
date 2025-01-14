@@ -32,8 +32,8 @@ class Genie(nn.Module):
     dyna_dim: int
     dyna_num_blocks: int
     dyna_num_heads: int
-    dropout: float
-    mask_limit: float
+    dropout: float = 0.0
+    mask_limit: float = 0.0
 
     def setup(self):
         self.tokenizer = TokenizerVQVAE(
