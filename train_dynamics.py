@@ -13,8 +13,8 @@ import jax.numpy as jnp
 import tyro
 import wandb
 
-from data.dataloader import get_dataloader
 from genie import Genie, restore_genie_components
+from utils.dataloader import get_dataloader
 
 ts = int(time.time())
 

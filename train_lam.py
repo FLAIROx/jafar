@@ -15,7 +15,7 @@ import tyro
 import wandb
 
 from models.lam import LatentActionModel
-from data.dataloader import get_dataloader
+from utils.dataloader import get_dataloader
 
 ts = int(time.time())
 

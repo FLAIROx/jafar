@@ -15,7 +15,7 @@ import tyro
 import wandb
 
 from models.tokenizer import TokenizerVQVAE
-from data.dataloader import get_dataloader
+from utils.dataloader import get_dataloader
 
 ts = int(time.time())
 

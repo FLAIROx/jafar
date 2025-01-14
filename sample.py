@@ -10,8 +10,8 @@ from orbax.checkpoint import PyTreeCheckpointer
 from PIL import Image, ImageDraw
 import tyro
 
-from data.dataloader import get_dataloader
 from genie import Genie
+from utils.dataloader import get_dataloader
 
 
 @dataclass
