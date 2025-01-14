@@ -84,15 +84,28 @@ class Genie(nn.Module):
         return outputs
 
     @nn.compact
-    def sample(self, batch: Dict[str, Any], steps: int = 25, temperature: int = 1, sample_argmax: bool = False) -> Any:
+    def sample(
+        self,
+        batch: Dict[str, Any],
+        steps: int = 25,
+        temperature: int = 1,
+        sample_argmax: bool = False,
+    ) -> Any:
         # --- Encode videos and actions ---
-        token_idxs = self.tokenizer.vq_encode(batch["videos"], training=False)['indices']
+        tokenizer_out = self.tokenizer.vq_encode(batch["videos"], training=False)
+        token_idxs = tokenizer_out["indices"]
         new_frame_idxs = jnp.zeros_like(token_idxs)[:, 0]
         action_tokens = self.lam.vq.get_codes(batch["latent_actions"])
 
         # --- Initialize MaskGIT ---
         init_mask = jnp.ones_like(token_idxs, dtype=bool)[:, 0]
-        init_carry = (batch["rng"], new_frame_idxs, init_mask, token_idxs, action_tokens)
+        init_carry = (
+            batch["rng"],
+            new_frame_idxs,
+            init_mask,
+            token_idxs,
+            action_tokens,
+        )
         MaskGITLoop = nn.scan(
             MaskGITStep,
             variable_broadcast="params",
@@ -103,15 +116,18 @@ class Genie(nn.Module):
         )
 
         # --- Run MaskGIT loop ---
-        final_carry, _ = MaskGITLoop(dynamics=self.dynamics,
+        loop_fn = MaskGITLoop(
+            dynamics=self.dynamics,
             tokenizer=self.tokenizer,
             temperature=temperature,
             sample_argmax=sample_argmax,
-            steps=steps)(init_carry, jnp.arange(steps))
+            steps=steps,
+        )
+        final_carry, _ = loop_fn(init_carry, jnp.arange(steps))
         new_frame_idxs = final_carry[1]
         new_frame_pixels = self.tokenizer.decode(
             jnp.expand_dims(new_frame_idxs, 1),
-            video_hw=batch['videos'].shape[2:4],
+            video_hw=batch["videos"].shape[2:4],
         )
         return new_frame_pixels
 
@@ -135,7 +151,9 @@ class MaskGITStep(nn.Module):
         B, T, N = token_idxs.shape[:3]
 
         # --- Construct + encode video ---
-        vid_token_idxs = jnp.concatenate((token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1)
+        vid_token_idxs = jnp.concatenate(
+            (token_idxs, jnp.expand_dims(final_token_idxs, 1)), axis=1
+        )
         vid_embed = self.dynamics.patch_embed(vid_token_idxs)
         curr_masked_frame = jnp.where(
             jnp.expand_dims(mask, -1),
@@ -171,7 +189,8 @@ class MaskGITStep(nn.Module):
         num_unmasked_tokens = jnp.round(N * (1.0 - unmasked_ratio)).astype(int)
         idx_mask = jnp.arange(final_token_probs.shape[-1]) > num_unmasked_tokens
         sorted_idxs = jnp.argsort(final_token_probs, axis=-1, descending=True)
-        new_mask = jax.vmap(lambda msk, ids: msk.at[ids].set(idx_mask))(mask, sorted_idxs)
+        mask_update_fn = jax.vmap(lambda msk, ids: msk.at[ids].set(idx_mask))
+        new_mask = mask_update_fn(mask, sorted_idxs)
 
         new_carry = (rng, new_token_idxs, new_mask, token_idxs, action_tokens)
         return new_carry, None

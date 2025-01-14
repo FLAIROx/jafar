@@ -138,7 +138,9 @@ def train_step(state, inputs, action_last_active):
     p_code = active_codes / active_codes.sum()
     reset_idxs = jax.random.choice(rng, num_codes, shape=(num_codes,), p=p_code)
     do_reset = action_last_active >= args.vq_reset_thresh
-    new_codebook = jnp.where(jnp.expand_dims(do_reset, -1), codebook[reset_idxs], codebook)
+    new_codebook = jnp.where(
+        jnp.expand_dims(do_reset, -1), codebook[reset_idxs], codebook
+    )
     state.params["params"]["vq"]["codebook"] = new_codebook
     action_last_active = jnp.where(do_reset, 0, action_last_active)
     return state, loss, recon, action_last_active, metrics
@@ -155,7 +157,9 @@ while step < args.num_steps:
             videos=jnp.array(videos, dtype=jnp.float32) / 255.0,
             rng=_rng,
         )
-        train_state, loss, recon, action_last_active, metrics = train_step(train_state, inputs, action_last_active)
+        train_state, loss, recon, action_last_active, metrics = train_step(
+            train_state, inputs, action_last_active
+        )
         print(f"Step {step}, loss: {loss}")
         step += 1
 

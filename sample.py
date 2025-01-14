@@ -48,6 +48,7 @@ class Args:
     dyna_num_blocks: int = 12
     dyna_num_heads: int = 8
 
+
 args = tyro.cli(Args)
 rng = jax.random.PRNGKey(args.seed)
 
@@ -77,12 +78,12 @@ rng, _rng = jax.random.split(rng)
 image_shape = (args.image_resolution, args.image_resolution, args.image_channels)
 dummy_inputs = dict(
     videos=jnp.zeros((args.batch_size, args.seq_len, *image_shape), dtype=jnp.float32),
-    mask_rng=_rng
+    mask_rng=_rng,
 )
 rng, _rng = jax.random.split(rng)
 params = genie.init(_rng, dummy_inputs)
-params["params"].update(
-    PyTreeCheckpointer().restore(args.checkpoint)["model"]["params"]["params"])
+ckpt = PyTreeCheckpointer().restore(args.checkpoint)["model"]["params"]["params"]
+params["params"].update(ckpt)
 
 # --- Get video + latent actions ---
 dataloader = get_dataloader(args.file_path, args.seq_len, args.batch_size)
@@ -91,12 +92,13 @@ for vids in dataloader:
     break
 batch = dict(videos=video_batch)
 lam_output = genie.apply(params, batch, False, method=Genie.vq_encode)
-lam_output = lam_output.reshape(args.batch_size, args.seq_len-1, 1)
+lam_output = lam_output.reshape(args.batch_size, args.seq_len - 1, 1)
+
 
 # --- Define autoregressive sampling loop ---
 def _autoreg_sample(rng, video_batch):
-    vid = video_batch[:, :args.start_frame+1]
-    for frame_idx in range(args.start_frame+1, args.seq_len):
+    vid = video_batch[:, : args.start_frame + 1]
+    for frame_idx in range(args.start_frame + 1, args.seq_len):
         # --- Sample next frame ---
         print("Frame", frame_idx)
         rng, _rng = jax.random.split(rng)
@@ -107,27 +109,33 @@ def _autoreg_sample(rng, video_batch):
             args.maskgit_steps,
             args.temperature,
             args.sample_argmax,
-            method=Genie.sample
+            method=Genie.sample,
         )
         vid = jnp.concatenate([vid, new_frame], axis=1)
     return vid
 
+
 # --- Sample + evaluate video ---
 vid = _autoreg_sample(rng, video_batch)
-gt = video_batch[:, :vid.shape[1]].clip(0, 1).reshape(-1, *video_batch.shape[2:])
+gt = video_batch[:, : vid.shape[1]].clip(0, 1).reshape(-1, *video_batch.shape[2:])
 recon = vid.clip(0, 1).reshape(-1, *vid.shape[2:])
-ssim = pix.ssim(gt[:, args.start_frame+1:], recon[:, args.start_frame+1:]).mean()
+ssim = pix.ssim(gt[:, args.start_frame + 1 :], recon[:, args.start_frame + 1 :]).mean()
 print(f"SSIM: {ssim}")
 
 # --- Save generated video ---
 original_frames = (video_batch * 255).astype(np.uint8)
 interweaved_frames = np.zeros((vid.shape[0] * 2, *vid.shape[1:5]), dtype=np.uint8)
-interweaved_frames[0::2] = original_frames[:, :vid.shape[1]]
+interweaved_frames[0::2] = original_frames[:, : vid.shape[1]]
 interweaved_frames[1::2] = (vid * 255).astype(np.uint8)
 flat_vid = einops.rearrange(interweaved_frames, "n t h w c -> t h (n w) c")
 imgs = [Image.fromarray(img) for img in flat_vid]
 for img, action in zip(imgs[1:], lam_output[0, :, 0]):
     d = ImageDraw.Draw(img)
-    d.text((2,2), f"{action}", fill=255)
-# duration is the number of milliseconds between frames; this is 40 frames per second
-imgs[0].save(f"generation_{time.time()}.gif", save_all=True, append_images=imgs[1:], duration=250, loop=0)
+    d.text((2, 2), f"{action}", fill=255)
+imgs[0].save(
+    f"generation_{time.time()}.gif",
+    save_all=True,
+    append_images=imgs[1:],
+    duration=250,
+    loop=0,
+)
