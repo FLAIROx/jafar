@@ -10,11 +10,11 @@ import orbax
 import numpy as np
 import jax
 import jax.numpy as jnp
-import wandb
 import tyro
+import wandb
 
-from genie import Genie, restore_genie_checkpoint
 from data.dataloader import get_dataloader
+from genie import Genie, restore_genie_components
 
 ts = int(time.time())
 
@@ -103,7 +103,7 @@ dummy_inputs = dict(
 )
 rng, _rng = jax.random.split(rng)
 init_params = genie.init(_rng, dummy_inputs)
-init_params = restore_genie_checkpoint(
+init_params = restore_genie_components(
     init_params, args.tokenizer_checkpoint, args.lam_checkpoint
 )
 lr_schedule = optax.warmup_cosine_decay_schedule(
@@ -113,8 +113,9 @@ tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.9, weight_decay=1e-4)
 train_state = TrainState.create(apply_fn=genie.apply, params=init_params, tx=tx)
 
 
+# --- Define dynamics loss + train step ---
 def dynamics_loss_fn(params, state, inputs):
-    # --- Compute masked loss ---
+    """Compute masked dynamics loss"""
     outputs = state.apply_fn(
         params, inputs, training=True, rngs={"dropout": inputs["dropout_rng"]}
     )
@@ -125,13 +126,20 @@ def dynamics_loss_fn(params, state, inputs):
     ce_loss = (mask * ce_loss).sum() / mask.sum()
     acc = outputs["token_logits"].argmax(-1) == outputs["video_tokens"]
     acc = (mask * acc).sum() / mask.sum()
-    metrics = dict(cross_entropy_loss=ce_loss, masked_token_accuracy=acc)
+    select_probs = jax.nn.softmax(outputs["token_logits"])
+    metrics = dict(
+        cross_entropy_loss=ce_loss,
+        masked_token_accuracy=acc,
+        select_logit=outputs["token_logits"].max(-1).mean(),
+        select_p=select_probs.max(-1).mean(),
+        entropy=jax.scipy.special.entr(select_probs).sum(-1).mean(),
+    )
     return ce_loss, (outputs["recon"], metrics)
 
 
-# --- Define train step ---
 @jax.jit
 def train_step(state, inputs):
+    """Update state and compute metrics"""
     grad_fn = jax.value_and_grad(dynamics_loss_fn, has_aux=True, allow_int=True)
     (loss, (recon, metrics)), grads = grad_fn(state.params, state, inputs)
     state = state.apply_gradients(grads=grads)

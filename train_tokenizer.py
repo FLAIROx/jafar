@@ -11,8 +11,8 @@ import numpy as np
 import dm_pix as pix
 import jax
 import jax.numpy as jnp
-import wandb
 import tyro
+import wandb
 
 from models.tokenizer import TokenizerVQVAE
 from data.dataloader import get_dataloader
