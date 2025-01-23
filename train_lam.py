@@ -7,6 +7,7 @@ from flax.training import orbax_utils
 from flax.training.train_state import TrainState
 import optax
 import orbax
+from orbax.checkpoint import PyTreeCheckpointer
 import numpy as np
 import dm_pix as pix
 import jax
@@ -28,7 +29,8 @@ class Args:
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "data/coinrun.npy"
+    data_dir: str = "data/coinrun_episodes"
+    checkpoint: str = ""
     # Optimization
     batch_size: int = 36
     vq_beta: float = 0.25
@@ -56,37 +58,6 @@ class Args:
 
 
 args = tyro.cli(Args)
-rng = jax.random.PRNGKey(args.seed)
-if args.log:
-    wandb.init(entity=args.entity, project=args.project, group="debug", config=args)
-
-# --- Construct train state ---
-lam = LatentActionModel(
-    in_dim=args.image_channels,
-    model_dim=args.model_dim,
-    latent_dim=args.latent_dim,
-    num_latents=args.num_latents,
-    patch_size=args.patch_size,
-    num_blocks=args.num_blocks,
-    num_heads=args.num_heads,
-    dropout=args.dropout,
-    codebook_dropout=args.codebook_dropout,
-)
-# Track when each action was last sampled
-action_last_active = jnp.zeros(args.num_latents)
-image_shape = (args.image_resolution, args.image_resolution, args.image_channels)
-rng, _rng = jax.random.split(rng)
-inputs = dict(
-    videos=jnp.zeros((args.batch_size, args.seq_len, *image_shape), dtype=jnp.float32),
-    rng=_rng,
-)
-rng, _rng = jax.random.split(rng)
-init_params = lam.init(_rng, inputs)
-lr_schedule = optax.warmup_cosine_decay_schedule(
-    args.min_lr, args.max_lr, args.warmup_steps, args.num_steps
-)
-tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.9, weight_decay=1e-4)
-train_state = TrainState.create(apply_fn=lam.apply, params=init_params, tx=tx)
 
 
 def lam_loss_fn(params, state, inputs):
@@ -121,7 +92,6 @@ def lam_loss_fn(params, state, inputs):
     return loss, (outputs["recon"], index_counts, metrics)
 
 
-# --- Define train step ---
 @jax.jit
 def train_step(state, inputs, action_last_active):
     # --- Update model ---
@@ -146,50 +116,92 @@ def train_step(state, inputs, action_last_active):
     return state, loss, recon, action_last_active, metrics
 
 
-# --- TRAIN LOOP ---
-dataloader = get_dataloader(args.file_path, args.seq_len, args.batch_size)
-step = 0
-while step < args.num_steps:
-    for videos in dataloader:
-        # --- Train step ---
-        rng, _rng = jax.random.split(rng)
-        inputs = dict(
-            videos=jnp.array(videos, dtype=jnp.float32) / 255.0,
-            rng=_rng,
-        )
-        train_state, loss, recon, action_last_active, metrics = train_step(
-            train_state, inputs, action_last_active
-        )
-        print(f"Step {step}, loss: {loss}")
-        step += 1
+if __name__ == "__main__":
+    rng = jax.random.PRNGKey(args.seed)
+    if args.log:
+        wandb.init(entity=args.entity, project=args.project, group="debug", config=args)
 
-        # --- Logging ---
-        if args.log:
-            if step % args.log_interval == 0:
-                wandb.log({"loss": loss, "step": step, **metrics})
-            if step % args.log_image_interval == 0:
-                gt_seq = inputs["videos"][0][1:]
-                recon_seq = recon[0].clip(0, 1)
-                comparison_seq = jnp.concatenate((gt_seq, recon_seq), axis=1)
-                comparison_seq = einops.rearrange(
-                    comparison_seq * 255, "t h w c -> h (t w) c"
-                )
-                log_images = dict(
-                    image=wandb.Image(np.asarray(gt_seq[0])),
-                    recon=wandb.Image(np.asarray(recon_seq[0])),
-                    true_vs_recon=wandb.Image(
-                        np.asarray(comparison_seq.astype(np.uint8))
-                    ),
-                )
-                wandb.log(log_images)
-            if step % args.log_checkpoint_interval == 0:
-                ckpt = {"model": train_state}
-                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(
-                    os.path.join(os.getcwd(), args.ckpt_dir, f"lam_{ts}_{step}"),
-                    ckpt,
-                    save_args=save_args,
-                )
-        if step >= args.num_steps:
-            break
+    # --- Initialize model ---
+    lam = LatentActionModel(
+        in_dim=args.image_channels,
+        model_dim=args.model_dim,
+        latent_dim=args.latent_dim,
+        num_latents=args.num_latents,
+        patch_size=args.patch_size,
+        num_blocks=args.num_blocks,
+        num_heads=args.num_heads,
+        dropout=args.dropout,
+        codebook_dropout=args.codebook_dropout,
+    )
+    # Track when each action was last sampled
+    action_last_active = jnp.zeros(args.num_latents)
+    image_shape = (args.image_resolution, args.image_resolution, args.image_channels)
+    rng, _rng = jax.random.split(rng)
+    inputs = dict(
+        videos=jnp.zeros(
+            (args.batch_size, args.seq_len, *image_shape), dtype=jnp.float32
+        ),
+        rng=_rng,
+    )
+    rng, _rng = jax.random.split(rng)
+    init_params = lam.init(_rng, inputs)
+
+    # --- Load checkpoint ---
+    step = 0
+    if args.checkpoint:
+        init_params["params"].update(
+            PyTreeCheckpointer().restore(args.checkpoint)["model"]["params"]["params"]
+        )
+        # Assume checkpoint is of the form tokenizer_<timestamp>_<step>
+        step += int(args.checkpoint.split("_")[-1])
+
+    # --- Initialize optimizer ---
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        args.min_lr, args.max_lr, args.warmup_steps, args.num_steps
+    )
+    tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.9, weight_decay=1e-4)
+    train_state = TrainState.create(apply_fn=lam.apply, params=init_params, tx=tx)
+
+    # --- TRAIN LOOP ---
+    dataloader = get_dataloader(args.data_dir, args.seq_len, args.batch_size)
+    while step < args.num_steps:
+        for videos in dataloader:
+            # --- Train step ---
+            rng, _rng = jax.random.split(rng)
+            inputs = dict(videos=videos, rng=_rng)
+            train_state, loss, recon, action_last_active, metrics = train_step(
+                train_state, inputs, action_last_active
+            )
+            print(f"Step {step}, loss: {loss}")
+            step += 1
+
+            # --- Logging ---
+            if args.log:
+                if step % args.log_interval == 0:
+                    wandb.log({"loss": loss, "step": step, **metrics})
+                if step % args.log_image_interval == 0:
+                    gt_seq = inputs["videos"][0][1:]
+                    recon_seq = recon[0].clip(0, 1)
+                    comparison_seq = jnp.concatenate((gt_seq, recon_seq), axis=1)
+                    comparison_seq = einops.rearrange(
+                        comparison_seq * 255, "t h w c -> h (t w) c"
+                    )
+                    log_images = dict(
+                        image=wandb.Image(np.asarray(gt_seq[0])),
+                        recon=wandb.Image(np.asarray(recon_seq[0])),
+                        true_vs_recon=wandb.Image(
+                            np.asarray(comparison_seq.astype(np.uint8))
+                        ),
+                    )
+                    wandb.log(log_images)
+                if step % args.log_checkpoint_interval == 0:
+                    ckpt = {"model": train_state}
+                    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                    save_args = orbax_utils.save_args_from_target(ckpt)
+                    orbax_checkpointer.save(
+                        os.path.join(os.getcwd(), args.ckpt_dir, f"lam_{ts}_{step}"),
+                        ckpt,
+                        save_args=save_args,
+                    )
+            if step >= args.num_steps:
+                break

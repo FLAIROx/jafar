@@ -27,7 +27,7 @@ class Args:
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "data/coinrun.npy"
+    data_dir: str = "data/coinrun_episodes"
     # Optimization
     batch_size: int = 36
     min_lr: float = 3e-6
@@ -67,53 +67,8 @@ class Args:
 
 
 args = tyro.cli(Args)
-rng = jax.random.PRNGKey(args.seed)
-if args.log:
-    wandb.init(entity=args.entity, project=args.project, group="debug", config=args)
-
-# --- Construct train state ---
-genie = Genie(
-    # Tokenizer
-    in_dim=args.image_channels,
-    tokenizer_dim=args.tokenizer_dim,
-    latent_patch_dim=args.latent_patch_dim,
-    num_patch_latents=args.num_patch_latents,
-    patch_size=args.patch_size,
-    tokenizer_num_blocks=args.tokenizer_num_blocks,
-    tokenizer_num_heads=args.tokenizer_num_heads,
-    # LAM
-    lam_dim=args.lam_dim,
-    latent_action_dim=args.latent_action_dim,
-    num_latent_actions=args.num_latent_actions,
-    lam_patch_size=args.lam_patch_size,
-    lam_num_blocks=args.lam_num_blocks,
-    lam_num_heads=args.lam_num_heads,
-    # Dynamics
-    dyna_dim=args.dyna_dim,
-    dyna_num_blocks=args.dyna_num_blocks,
-    dyna_num_heads=args.dyna_num_heads,
-    dropout=args.dropout,
-    mask_limit=args.mask_limit,
-)
-rng, _rng = jax.random.split(rng)
-image_shape = (args.image_resolution, args.image_resolution, args.image_channels)
-dummy_inputs = dict(
-    videos=jnp.zeros((args.batch_size, args.seq_len, *image_shape), dtype=jnp.float32),
-    mask_rng=_rng,
-)
-rng, _rng = jax.random.split(rng)
-init_params = genie.init(_rng, dummy_inputs)
-init_params = restore_genie_components(
-    init_params, args.tokenizer_checkpoint, args.lam_checkpoint
-)
-lr_schedule = optax.warmup_cosine_decay_schedule(
-    args.min_lr, args.max_lr, args.warmup_steps, args.num_steps
-)
-tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.9, weight_decay=1e-4)
-train_state = TrainState.create(apply_fn=genie.apply, params=init_params, tx=tx)
 
 
-# --- Define dynamics loss + train step ---
 def dynamics_loss_fn(params, state, inputs):
     """Compute masked dynamics loss"""
     outputs = state.apply_fn(
@@ -150,50 +105,100 @@ def train_step(state, inputs):
     return state, loss, recon, metrics
 
 
-# --- TRAIN LOOP ---
-dataloader = get_dataloader(args.file_path, args.seq_len, args.batch_size)
-step = 0
-while step < args.num_steps:
-    for videos in dataloader:
-        # --- Train step ---
-        rng, _rng, _mask_rng = jax.random.split(rng, 3)
-        inputs = dict(
-            videos=jnp.array(videos, dtype=jnp.float32) / 255.0,
-            action=jnp.zeros((args.batch_size, args.seq_len), dtype=jnp.float32),
-            dropout_rng=_rng,
-            mask_rng=_mask_rng,
-        )
-        train_state, loss, recon, metrics = train_step(train_state, inputs)
-        print(f"Step {step}, loss: {loss}")
-        step += 1
+if __name__ == "__main__":
+    rng = jax.random.PRNGKey(args.seed)
+    if args.log:
+        wandb.init(entity=args.entity, project=args.project, group="debug", config=args)
 
-        # --- Logging ---
-        if args.log:
-            if step % args.log_interval == 0:
-                wandb.log({"loss": loss, "step": step, **metrics})
-            if step % args.log_image_interval == 0:
-                gt_seq = inputs["videos"][0]
-                recon_seq = recon[0].clip(0, 1)
-                comparison_seq = jnp.concatenate((gt_seq, recon_seq), axis=1)
-                comparison_seq = einops.rearrange(
-                    comparison_seq * 255, "t h w c -> h (t w) c"
-                )
-                log_images = dict(
-                    image=wandb.Image(np.asarray(gt_seq[15])),
-                    recon=wandb.Image(np.asarray(recon_seq[15])),
-                    true_vs_recon=wandb.Image(
-                        np.asarray(comparison_seq.astype(np.uint8))
-                    ),
-                )
-                wandb.log(log_images)
-            if step % args.log_checkpoint_interval == 0:
-                ckpt = {"model": train_state}
-                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                save_args = orbax_utils.save_args_from_target(ckpt)
-                orbax_checkpointer.save(
-                    os.path.join(os.getcwd(), args.ckpt_dir, f"genie_{ts}_{step}"),
-                    ckpt,
-                    save_args=save_args,
-                )
-        if step >= args.num_steps:
-            break
+    # --- Initialize model ---
+    genie = Genie(
+        # Tokenizer
+        in_dim=args.image_channels,
+        tokenizer_dim=args.tokenizer_dim,
+        latent_patch_dim=args.latent_patch_dim,
+        num_patch_latents=args.num_patch_latents,
+        patch_size=args.patch_size,
+        tokenizer_num_blocks=args.tokenizer_num_blocks,
+        tokenizer_num_heads=args.tokenizer_num_heads,
+        # LAM
+        lam_dim=args.lam_dim,
+        latent_action_dim=args.latent_action_dim,
+        num_latent_actions=args.num_latent_actions,
+        lam_patch_size=args.lam_patch_size,
+        lam_num_blocks=args.lam_num_blocks,
+        lam_num_heads=args.lam_num_heads,
+        # Dynamics
+        dyna_dim=args.dyna_dim,
+        dyna_num_blocks=args.dyna_num_blocks,
+        dyna_num_heads=args.dyna_num_heads,
+        dropout=args.dropout,
+        mask_limit=args.mask_limit,
+    )
+    rng, _rng = jax.random.split(rng)
+    image_shape = (args.image_resolution, args.image_resolution, args.image_channels)
+    dummy_inputs = dict(
+        videos=jnp.zeros(
+            (args.batch_size, args.seq_len, *image_shape), dtype=jnp.float32
+        ),
+        mask_rng=_rng,
+    )
+    rng, _rng = jax.random.split(rng)
+    init_params = genie.init(_rng, dummy_inputs)
+    init_params = restore_genie_components(
+        init_params, args.tokenizer_checkpoint, args.lam_checkpoint
+    )
+
+    # --- Initialize optimizer ---
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        args.min_lr, args.max_lr, args.warmup_steps, args.num_steps
+    )
+    tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.9, weight_decay=1e-4)
+    train_state = TrainState.create(apply_fn=genie.apply, params=init_params, tx=tx)
+
+    # --- TRAIN LOOP ---
+    dataloader = get_dataloader(args.data_dir, args.seq_len, args.batch_size)
+    step = 0
+    while step < args.num_steps:
+        for videos in dataloader:
+            # --- Train step ---
+            rng, _rng, _mask_rng = jax.random.split(rng, 3)
+            inputs = dict(
+                videos=videos,
+                action=jnp.zeros((args.batch_size, args.seq_len), dtype=jnp.float32),
+                dropout_rng=_rng,
+                mask_rng=_mask_rng,
+            )
+            train_state, loss, recon, metrics = train_step(train_state, inputs)
+            print(f"Step {step}, loss: {loss}")
+            step += 1
+
+            # --- Logging ---
+            if args.log:
+                if step % args.log_interval == 0:
+                    wandb.log({"loss": loss, "step": step, **metrics})
+                if step % args.log_image_interval == 0:
+                    gt_seq = inputs["videos"][0]
+                    recon_seq = recon[0].clip(0, 1)
+                    comparison_seq = jnp.concatenate((gt_seq, recon_seq), axis=1)
+                    comparison_seq = einops.rearrange(
+                        comparison_seq * 255, "t h w c -> h (t w) c"
+                    )
+                    log_images = dict(
+                        image=wandb.Image(np.asarray(gt_seq[15])),
+                        recon=wandb.Image(np.asarray(recon_seq[15])),
+                        true_vs_recon=wandb.Image(
+                            np.asarray(comparison_seq.astype(np.uint8))
+                        ),
+                    )
+                    wandb.log(log_images)
+                if step % args.log_checkpoint_interval == 0:
+                    ckpt = {"model": train_state}
+                    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                    save_args = orbax_utils.save_args_from_target(ckpt)
+                    orbax_checkpointer.save(
+                        os.path.join(os.getcwd(), args.ckpt_dir, f"genie_{ts}_{step}"),
+                        ckpt,
+                        save_args=save_args,
+                    )
+            if step >= args.num_steps:
+                break
