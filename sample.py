@@ -21,13 +21,13 @@ class Args:
     seq_len: int = 16
     image_channels: int = 3
     image_resolution: int = 64
-    file_path: str = "data/coinrun.npy"
+    data_dir: str = "data/coinrun_episodes"
     checkpoint: str = ""
     # Sampling
     batch_size: int = 1
     maskgit_steps: int = 25
     temperature: float = 1.0
-    sample_argmax: bool = False
+    sample_argmax: bool = True
     start_frame: int = 0
     # Tokenizer checkpoint
     tokenizer_dim: int = 512
@@ -40,7 +40,7 @@ class Args:
     lam_dim: int = 512
     latent_action_dim: int = 32
     num_latent_actions: int = 6
-    lam_patch_size: int = 8
+    lam_patch_size: int = 16
     lam_num_blocks: int = 8
     lam_num_heads: int = 8
     # Dynamics checkpoint
@@ -85,24 +85,14 @@ params = genie.init(_rng, dummy_inputs)
 ckpt = PyTreeCheckpointer().restore(args.checkpoint)["model"]["params"]["params"]
 params["params"].update(ckpt)
 
-# --- Get video + latent actions ---
-dataloader = get_dataloader(args.file_path, args.seq_len, args.batch_size)
-for vids in dataloader:
-    video_batch = jnp.array(vids, dtype=jnp.float32) / 255.0
-    break
-batch = dict(videos=video_batch)
-lam_output = genie.apply(params, batch, False, method=Genie.vq_encode)
-lam_output = lam_output.reshape(args.batch_size, args.seq_len - 1, 1)
-
-
 # --- Define autoregressive sampling loop ---
-def _autoreg_sample(rng, video_batch):
+def _autoreg_sample(rng, video_batch, action_batch):
     vid = video_batch[:, : args.start_frame + 1]
     for frame_idx in range(args.start_frame + 1, args.seq_len):
         # --- Sample next frame ---
         print("Frame", frame_idx)
         rng, _rng = jax.random.split(rng)
-        batch = dict(videos=vid, latent_actions=lam_output[:, :frame_idx], rng=_rng)
+        batch = dict(videos=vid, latent_actions=action_batch[:, :frame_idx], rng=_rng)
         new_frame = genie.apply(
             params,
             batch,
@@ -115,21 +105,39 @@ def _autoreg_sample(rng, video_batch):
     return vid
 
 
+# --- Get video + latent actions ---
+dataloader = get_dataloader(args.data_dir, args.seq_len, args.batch_size)
+video_batch = next(iter(dataloader))
+# Get latent actions from first video only
+first_video = video_batch[:1]
+batch = dict(videos=first_video)
+action_batch = genie.apply(params, batch, False, method=Genie.vq_encode)
+action_batch = action_batch.reshape(1, args.seq_len - 1, 1)
+# Use actions from first video for all videos
+action_batch = jnp.repeat(action_batch, video_batch.shape[0], axis=0)
+
 # --- Sample + evaluate video ---
-vid = _autoreg_sample(rng, video_batch)
+vid = _autoreg_sample(rng, video_batch, action_batch)
 gt = video_batch[:, : vid.shape[1]].clip(0, 1).reshape(-1, *video_batch.shape[2:])
 recon = vid.clip(0, 1).reshape(-1, *vid.shape[2:])
 ssim = pix.ssim(gt[:, args.start_frame + 1 :], recon[:, args.start_frame + 1 :]).mean()
 print(f"SSIM: {ssim}")
 
-# --- Save generated video ---
-original_frames = (video_batch * 255).astype(np.uint8)
-interweaved_frames = np.zeros((vid.shape[0] * 2, *vid.shape[1:5]), dtype=np.uint8)
-interweaved_frames[0::2] = original_frames[:, : vid.shape[1]]
-interweaved_frames[1::2] = (vid * 255).astype(np.uint8)
-flat_vid = einops.rearrange(interweaved_frames, "n t h w c -> t h (n w) c")
+# --- Construct video ---
+first_true = (video_batch[0:1] * 255).astype(np.uint8)
+first_pred = (vid[0:1] * 255).astype(np.uint8)
+first_video_comparison = np.zeros((2, *vid.shape[1:5]), dtype=np.uint8)
+first_video_comparison[0] = first_true[:, : vid.shape[1]]
+first_video_comparison[1] = first_pred
+# For other videos, only show generated video
+other_preds = (vid[1:] * 255).astype(np.uint8)
+all_frames = np.concatenate([first_video_comparison, other_preds], axis=0)
+flat_vid = einops.rearrange(all_frames, "n t h w c -> t h (n w) c")
+
+# --- Save video ---
 imgs = [Image.fromarray(img) for img in flat_vid]
-for img, action in zip(imgs[1:], lam_output[0, :, 0]):
+# Write actions on each frame
+for img, action in zip(imgs[1:], action_batch[0, :, 0]):
     d = ImageDraw.Draw(img)
     d.text((2, 2), f"{action}", fill=255)
 imgs[0].save(
